@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Крестики-нолики</title>
+    <script src="https://telegram.org"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: var(--tg-theme-bg-color, #1c1c1e);
+            color: var(--tg-theme-text-color, #ffffff);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        #login-screen, #game-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+        }
+        #game-screen { display: none; }
+        input {
+            padding: 12px;
+            font-size: 16px;
+            border-radius: 10px;
+            border: 1px solid #555;
+            text-align: center;
+            outline: none;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 10px;
+            border: none;
+            background-color: var(--tg-theme-button-color, #0088cc);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-secondary { background-color: #3a3a3c; color: #ffffff; }
+        #scoreboard {
+            display: flex;
+            gap: 20px;
+            background-color: var(--tg-theme-secondary-bg-color, #2c2c2e);
+            padding: 8px 20px;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+        }
+        .board-wrapper {
+            position: relative;
+            width: 301px;
+            height: 301px;
+            margin-top: 5px;
+        }
+        .board {
+            display: grid;
+            grid-template-columns: repeat(3, 95px);
+            grid-template-rows: repeat(3, 95px);
+            gap: 8px;
+        }
+        .cell {
+            background-color: var(--tg-theme-secondary-bg-color, #2c2c2e);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 44px;
+            font-weight: bold;
+            cursor: pointer;
+            user-select: none;
+        }
+        #win-line-svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        #win-line {
+            stroke-width: 8;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.35s ease-out;
+        }
+        #status {
+            font-size: 18px;
+            font-weight: 500;
+            text-align: center;
+            min-height: 24px;
+        }
+        #end-controls {
+            display: none;
+            flex-direction: column;
+            gap: 10px;
+            width: 100%;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <h2>Крестики-нолики</h2>
+        <input type="text" id="room-input" placeholder="Придумайте код комнаты" maxlength="10">
+        <button onclick="joinGame()">Войти в игру</button>
+    </div>
+
+    <div id="game-screen">
+        <div id="scoreboard">
+            <span>Вы: <span id="my-score">0</span></span>
+            <span>Ничьи: <span id="draw-score">0</span></span>
+            <span>Соперник: <span id="opp-score">0</span></span>
+        </div>
+        <div id="status">Ожидание второго игрока...</div>
+        <div class="board-wrapper">
+            <div class="board" id="board"></div>
+            <svg id="win-line-svg" viewBox="0 0 301 301">
+                <line id="win-line" x1="0" y1="0" x2="0" y2="0" stroke="transparent" />
+            </svg>
+        </div>
+        <div id="end-controls">
+            <button id="rematch-btn" onclick="requestRematch()">Играть снова</button>
+            <button class="btn-secondary" onclick="location.reload()">Выйти в меню</button>
+        </div>
+    </div>
+    <script>
+        const tg = window.Telegram?.WebApp;
+        if (tg) { tg.ready(); tg.expand(); }
+
+        let ws;
+        let mySymbol = "";
+        let myTurn = false;
+        let gameActive = false;
+        let boardState = new Array("", "", "", "", "", "", "", "", "");
+
+        let myScore = 0;
+        let oppScore = 0;
+        let drawScore = 0;
+
+        const winCombos = new Array(
+            new Array(0, 1, 2), new Array(3, 4, 5), new Array(6, 7, 8),
+            new Array(0, 3, 6), new Array(1, 4, 7), new Array(2, 5, 8),
+            new Array(0, 4, 8), new Array(2, 4, 6)
+        );
+
+        const cellCenters = new Array(
+            {x: 47.5, y: 47.5},  {x: 150.5, y: 47.5},  {x: 253.5, y: 47.5},
+            {x: 47.5, y: 150.5}, {x: 150.5, y: 150.5}, {x: 253.5, y: 150.5},
+            {x: 47.5, y: 253.5}, {x: 150.5, y: 253.5}, {x: 253.5, y: 253.5}
+        );
+
+        function joinGame() {
+            const room = document.getElementById("room-input").value.trim();
+            if (!room) return alert("Введите код комнаты!");
+
+            const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+            ws = new WebSocket(`${protocol}//${location.host}/ws/${room}`);
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+
+                if (msg.type === "error") {
+                    alert(msg.message);
+                } else if (msg.type === "init") {
+                    mySymbol = msg.symbol;
+                    document.getElementById("login-screen").style.display = "none";
+                    document.getElementById("game-screen").style.display = "flex";
+                    createBoard();
+                    document.getElementById("status").innerText = `Вы играете за ${mySymbol}. Ждём друга...`;
+                } else if (msg.type === "start") {
+                    startNewRound(mySymbol);
+                } else if (msg.type === "move") {
+                    makeMove(msg.index, msg.symbol, false);
+                } else if (msg.type === "opponent_wants_rematch") {
+                    const btn = document.getElementById("rematch-btn");
+                    if (!btn.disabled) btn.innerText = "Играть снова (Соперник готов!)";
+                } else if (msg.type === "restart_game") {
+                    startNewRound(msg.symbol);
+                } else if (msg.type === "opponent_left") {
+                    gameActive = false;
+                    document.getElementById("status").innerText = "Соперник вышел из игры";
+                    document.getElementById("end-controls").style.display = "flex";
+                    document.getElementById("rematch-btn").style.display = "none";
+                }
+            };
+        }
+
+        function createBoard() {
+            const board = document.getElementById("board");
+            board.innerHTML = "";
+            for (let i = 0; i < 9; i++) {
+                const cell = document.createElement("div");
+                cell.className = "cell";
+                cell.onclick = () => handleCellClick(i);
+                board.appendChild(cell);
+            }
+        }
+
+        function startNewRound(symbol) {
+            mySymbol = symbol;
+            boardState = new Array("", "", "", "", "", "", "", "", "");
+            gameActive = true;
+            myTurn = (mySymbol === "X");
+            
+            const cells = document.getElementsByClassName("cell");
+            for (let cell of cells) cell.innerText = "";
+            
+            const line = document.getElementById("win-line");
+            line.setAttribute("stroke", "transparent");
+            line.style.strokeDasharray = "none";
+            
+            document.getElementById("end-controls").style.display = "none";
+            const rematchBtn = document.getElementById("rematch-btn");
+            rematchBtn.disabled = false;
+            rematchBtn.innerText = "Играть снова";
+            
+            updateStatus();
+        }
+
+        function handleCellClick(index) {
+            if (!gameActive || !myTurn || boardState.at(index) !== "") return;
+            makeMove(index, mySymbol, true);
+            ws.send(JSON.stringify({ type: "move", index: index, symbol: mySymbol }));
+        }
+
+        function makeMove(index, symbol, isMine) {
+            boardState[index] = symbol;
+            const cells = document.getElementsByClassName("cell");
+            cells[index].innerText = symbol;
+            cells[index].style.color = symbol === "X" ? "#34c759" : "#ff3b30";
+
+            const winningCombo = getWinningCombo(symbol);
+            if (winningCombo) {
+                gameActive = false;
+                drawWinLine(winningCombo, symbol);
+                if (isMine) {
+                    myScore++;
+                    document.getElementById("my-score").innerText = myScore;
+                    document.getElementById("status").innerText = "Вы победили!";
+                } else {
+                    oppScore++;
+                    document.getElementById("opp-score").innerText = oppScore;
+                    document.getElementById("status").innerText = "Вы проиграли";
+                }
+                document.getElementById("end-controls").style.display = "flex";
+                return;
+            }
+
+            if (!boardState.includes("")) {
+                gameActive = false;
+                drawScore++;
+                document.getElementById("draw-score").innerText = drawScore;
+                document.getElementById("status").innerText = "Ничья!";
+                document.getElementById("end-controls").style.display = "flex";
+                return;
+            }
+
+            myTurn = !isMine;
+            updateStatus();
+        }
+
+        function updateStatus() {
+            document.getElementById("status").innerText = myTurn ? `Ваш ход (${mySymbol})` : `Ход соперника...`;
+        }
+
+        function getWinningCombo(symbol) {
+            return winCombos.find(combo => combo.every(index => boardState.at(index) === symbol));
+        }
+
+        function drawWinLine(combo, symbol) {
+            const start = cellCenters.at(combo.at(0));
+            const end = cellCenters.at(combo.at(2));
+            const line = document.getElementById("win-line");
+            
+            line.setAttribute("x1", start.x);
+            line.setAttribute("y1", start.y);
+            line.setAttribute("x2", end.x);
+            line.setAttribute("y2", end.y);
+            line.setAttribute("stroke", symbol === "X" ? "#34c759" : "#ff3b30");
+
+            const length = Math.hypot(end.x - start.x, end.y - start.y);
+            line.style.strokeDasharray = length;
+            line.style.strokeDashoffset = length;
+            line.getBoundingClientRect();
+            line.style.strokeDashoffset = "0";
+        }
+
+        function requestRematch() {
+            const btn = document.getElementById("rematch-btn");
+            btn.disabled = true;
+            btn.innerText = "Ожидание соперника...";
+            ws.send(JSON.stringify({ type: "rematch" }));
+        }
+    </script>
+</body>
+</html>
