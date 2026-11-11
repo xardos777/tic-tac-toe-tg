@@ -135,7 +135,7 @@
         const tg = window.Telegram?.WebApp;
         if (tg) { tg.ready(); tg.expand(); }
 
-        const DB_URL = "https://firebaseio.com";
+        const DB_URL = "https://krestiki-bf26e-default-rtdb.europe-west1.firebasedatabase.app";
         let roomUrl = "";
         let pollTimer = null;
         let myId = "p_" + Math.random().toString(36).substring(2, 9);
