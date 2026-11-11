@@ -128,23 +128,16 @@
         </div>
         <div id="end-controls">
             <button id="rematch-btn" onclick="requestRematch()">Играть снова</button>
-            <button class="btn-secondary" onclick="location.reload()">Выйти в меню</button>
+            <button class="btn-secondary" onclick="leaveGame()">Выйти в меню</button>
         </div>
     </div>
-    <script type="module">
-        import { initializeApp } from "https://gstatic.com";
-        import { getDatabase, ref, set, get, update, onValue, onDisconnect } from "https://gstatic.com";
-
+    <script>
         const tg = window.Telegram?.WebApp;
         if (tg) { tg.ready(); tg.expand(); }
 
-        // Подключаемся к твоей базе данных Firebase
-        const app = initializeApp({
-            databaseURL: "https://firebaseio.com"
-        });
-        const db = getDatabase(app);
-
-        let roomRef = null;
+        const DB_URL = "https://firebaseio.com";
+        let roomUrl = "";
+        let pollTimer = null;
         let myId = "p_" + Math.random().toString(36).substring(2, 9);
         let mySymbol = "";
         let myTurn = false;
@@ -168,7 +161,26 @@
             {x: 47.5, y: 253.5}, {x: 150.5, y: 253.5}, {x: 253.5, y: 253.5}
         );
 
-        window.joinGame = async function() {
+        async function dbGet() {
+            const res = await fetch(roomUrl);
+            return await res.json();
+        }
+
+        async function dbSet(data) {
+            await fetch(roomUrl, {
+                method: "PUT",
+                body: JSON.stringify(data)
+            });
+        }
+
+        async function dbUpdate(data) {
+            await fetch(roomUrl, {
+                method: "PATCH",
+                body: JSON.stringify(data)
+            });
+        }
+
+        async function joinGame() {
             const roomCode = document.getElementById("room-input").value.trim().toLowerCase();
             if (!roomCode) return alert("Введите код комнаты!");
 
@@ -176,123 +188,126 @@
             btn.disabled = true;
             btn.innerText = "Подключение...";
 
-            roomRef = ref(db, "rooms/" + roomCode);
-            const snap = await get(roomRef);
-            const data = snap.val();
+            roomUrl = `${DB_URL}/rooms/${roomCode}.json`;
 
-            // Если комнаты нет или она пустая — создаём как X
-            if (!data || !data.p1) {
-                mySymbol = "X";
-                await set(roomRef, {
-                    p1: myId,
-                    p2: "",
-                    board: ",,,,,,,,",
-                    turn: "X",
-                    round: 1,
-                    rematch: ""
-                });
-                onDisconnect(ref(db, "rooms/" + roomCode + "/p1")).set("");
-            } else if (!data.p2) {
-                // Если есть первый игрок, входим как O
-                mySymbol = "O";
-                await update(roomRef, { p2: myId });
-                onDisconnect(ref(db, "rooms/" + roomCode + "/p2")).set("");
-            } else {
-                alert("Комната уже заполнена!");
+            try {
+                const data = await dbGet();
+                const now = Date.now();
+                // Если комната старше 10 минут, считаем её свободной
+                const isOld = data && data.updated && (now - data.updated > 600000);
+
+                if (!data || !data.p1 || isOld) {
+                    mySymbol = "X";
+                    await dbSet({
+                        p1: myId,
+                        p2: "",
+                        board: ",,,,,,,,",
+                        turn: "X",
+                        round: 1,
+                        rematch: "",
+                        updated: now
+                    });
+                } else if (!data.p2) {
+                    mySymbol = "O";
+                    await dbUpdate({ p2: myId, updated: now });
+                } else {
+                    alert("Комната уже заполнена!");
+                    btn.disabled = false;
+                    btn.innerText = "Войти в игру";
+                    return;
+                }
+
+                document.getElementById("login-screen").style.display = "none";
+                document.getElementById("game-screen").style.display = "flex";
+                createBoard();
+
+                // Проверяем состояние комнаты каждые 700 мс
+                pollTimer = setInterval(syncRoom, 700);
+                syncRoom();
+            } catch (err) {
+                alert("Ошибка подключения к базе. Проверьте интернет или Rules в Firebase.");
                 btn.disabled = false;
                 btn.innerText = "Войти в игру";
+            }
+        }
+
+        async function syncRoom() {
+            const state = await dbGet();
+            if (!state) return;
+
+            if (!state.p1 || !state.p2) {
+                if (gameActive) {
+                    gameActive = false;
+                    document.getElementById("status").innerText = "Соперник вышел из игры";
+                    document.getElementById("end-controls").style.display = "flex";
+                    document.getElementById("rematch-btn").style.display = "none";
+                } else {
+                    document.getElementById("status").innerText = `Вы играете за ${mySymbol}. Ждём друга...`;
+                }
                 return;
             }
 
-            document.getElementById("login-screen").style.display = "none";
-            document.getElementById("game-screen").style.display = "flex";
-            createBoard();
+            if (state.round > currentRound) {
+                currentRound = state.round;
+                mySymbol = (mySymbol === "X") ? "O" : "X";
+                resetVisualBoard();
+            }
 
-            // Слушаем изменения в комнате в реальном времени
-            onValue(roomRef, (snapshot) => {
-                const state = snapshot.val();
-                if (!state) return;
+            if (state.rematch && state.rematch !== myId) {
+                const rBtn = document.getElementById("rematch-btn");
+                if (!rBtn.disabled) rBtn.innerText = "Играть снова (Соперник готов!)";
+            }
 
-                // Проверяем, оба ли игрока в комнате
-                if (!state.p1 || !state.p2) {
-                    if (gameActive) {
-                        gameActive = false;
-                        document.getElementById("status").innerText = "Соперник вышел из игры 😢";
-                        document.getElementById("end-controls").style.display = "flex";
-                        document.getElementById("rematch-btn").style.display = "none";
-                    } else {
-                        document.getElementById("status").innerText = `Вы играете за ${mySymbol}. Ждём друга...`;
-                    }
-                    return;
+            const serverBoard = state.board.split(",");
+            let changed = false;
+            for (let i = 0; i < 9; i++) {
+                if (boardState.at(i) !== serverBoard.at(i)) {
+                    boardState[i] = serverBoard.at(i);
+                    const cell = document.getElementsByClassName("cell")[i];
+                    cell.innerText = boardState.at(i);
+                    cell.style.color = boardState.at(i) === "X" ? "#34c759" : "#ff3b30";
+                    changed = true;
                 }
+            }
 
-                // Проверка на старт нового раунда (реванш)
-                if (state.round > currentRound) {
-                    currentRound = state.round;
-                    mySymbol = (mySymbol === "X") ? "O" : "X";
-                    resetVisualBoard();
+            const winX = getWinningCombo("X");
+            const winO = getWinningCombo("O");
+            const winner = winX ? "X" : (winO ? "O" : null);
+            const winCombo = winX || winO;
+
+            if (winner && (gameActive || changed)) {
+                gameActive = false;
+                drawWinLine(winCombo, winner);
+                if (winner === mySymbol) {
+                    myScore++;
+                    document.getElementById("my-score").innerText = myScore;
+                    document.getElementById("status").innerText = "Вы победили!";
+                } else {
+                    oppScore++;
+                    document.getElementById("opp-score").innerText = oppScore;
+                    document.getElementById("status").innerText = "Вы проиграли";
                 }
+                document.getElementById("end-controls").style.display = "flex";
+                return;
+            }
 
-                // Статус кнопки реванша
-                if (state.rematch && state.rematch !== myId) {
-                    const rBtn = document.getElementById("rematch-btn");
-                    if (!rBtn.disabled) rBtn.innerText = "Играть снова (Соперник готов!)";
-                }
+            if (!boardState.includes("") && (gameActive || changed)) {
+                gameActive = false;
+                drawScore++;
+                document.getElementById("draw-score").innerText = drawScore;
+                document.getElementById("status").innerText = "Ничья!";
+                document.getElementById("end-controls").style.display = "flex";
+                return;
+            }
 
-                // Обновляем поле
-                const serverBoard = state.board.split(",");
-                let changed = false;
-                for (let i = 0; i < 9; i++) {
-                    if (boardState.at(i) !== serverBoard.at(i)) {
-                        boardState[i] = serverBoard.at(i);
-                        const cell = document.getElementsByClassName("cell")[i];
-                        cell.innerText = boardState.at(i);
-                        cell.style.color = boardState.at(i) === "X" ? "#34c759" : "#ff3b30";
-                        changed = true;
-                    }
-                }
-
-                // Проверяем победу или ничью
-                const winX = getWinningCombo("X");
-                const winO = getWinningCombo("O");
-                const winner = winX ? "X" : (winO ? "O" : null);
-                const winCombo = winX || winO;
-
-                if (winner && (gameActive || changed)) {
-                    gameActive = false;
-                    drawWinLine(winCombo, winner);
-                    if (winner === mySymbol) {
-                        myScore++;
-                        document.getElementById("my-score").innerText = myScore;
-                        document.getElementById("status").innerText = "Вы победили! 🎉";
-                    } else {
-                        oppScore++;
-                        document.getElementById("opp-score").innerText = oppScore;
-                        document.getElementById("status").innerText = "Вы проиграли 😔";
-                    }
-                    document.getElementById("end-controls").style.display = "flex";
-                    return;
-                }
-
-                if (!boardState.includes("") && (gameActive || changed)) {
-                    gameActive = false;
-                    drawScore++;
-                    document.getElementById("draw-score").innerText = drawScore;
-                    document.getElementById("status").innerText = "Ничья! 🤝";
-                    document.getElementById("end-controls").style.display = "flex";
-                    return;
-                }
-
-                // Обычный ход
-                if (!winner && boardState.includes("")) {
-                    gameActive = true;
-                    myTurn = (state.turn === mySymbol);
-                    document.getElementById("status").innerText = myTurn 
-                        ? `Ваш ход (${mySymbol})` 
-                        : `Ход соперника...`;
-                }
-            });
-        };
+            if (!winner && boardState.includes("")) {
+                gameActive = true;
+                myTurn = (state.turn === mySymbol);
+                document.getElementById("status").innerText = myTurn 
+                    ? `Ваш ход (${mySymbol})` 
+                    : `Ход соперника...`;
+            }
+        }
 
         function createBoard() {
             const board = document.getElementById("board");
@@ -324,10 +339,12 @@
             const newBoard = boardState.slice();
             newBoard[index] = mySymbol;
             const nextTurn = (mySymbol === "X") ? "O" : "X";
-            await update(roomRef, {
+            await dbUpdate({
                 board: newBoard.join(","),
-                turn: nextTurn
+                turn: nextTurn,
+                updated: Date.now()
             });
+            syncRoom();
         }
 
         function getWinningCombo(symbol) {
@@ -350,24 +367,34 @@
             line.getBoundingClientRect();
             line.style.strokeDashoffset = "0";
         }
-        window.requestRematch = async function() {
+
+        async function requestRematch() {
             const btn = document.getElementById("rematch-btn");
             btn.disabled = true;
             btn.innerText = "Ожидание соперника...";
             
-            const snap = await get(roomRef);
-            const state = snap.val();
+            const state = await dbGet();
             if (state.rematch && state.rematch !== myId) {
-                await update(roomRef, {
+                await dbUpdate({
                     board: ",,,,,,,,",
                     turn: "X",
                     round: state.round + 1,
-                    rematch: ""
+                    rematch: "",
+                    updated: Date.now()
                 });
             } else {
-                await update(roomRef, { rematch: myId });
+                await dbUpdate({ rematch: myId, updated: Date.now() });
             }
-        };
+            syncRoom();
+        }
+        async function leaveGame() {
+            clearInterval(pollTimer);
+            if (roomUrl) {
+                const field = (mySymbol === "X") ? "p1" : "p2";
+                await dbUpdate({ [field]: "" });
+            }
+            location.reload();
+        }
     </script>
 </body>
 </html>
