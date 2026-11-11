@@ -131,11 +131,20 @@
             <button class="btn-secondary" onclick="leaveGame()">Выйти в меню</button>
         </div>
     </div>
-    <script>
+       <script>
         const tg = window.Telegram?.WebApp;
         if (tg) { tg.ready(); tg.expand(); }
-        const DB_URL = "https://krestiki-bf26e-default-rtdb.europe-west1.firebasedatabase.app";
-        let roomUrl = "";
+
+        const SB_URL = "https://supabase.co";
+        const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ1ZnZzeHlpbGNzbWR0aHdqYXl5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQzNjY0MjgsImV4cCI6MjEwOTk0MjQyOH0.dtX6hmmE906ixA_6feH61XEwMeGyOoZ1SbfDDNc6aAk";
+        const HEADERS = {
+            "apikey": SB_KEY,
+            "Authorization": "Bearer " + SB_KEY,
+            "Content-Type": "application/json",
+            "Prefer": "return=representation"
+        };
+
+        let currentRoomId = "";
         let pollTimer = null;
         let myId = "p_" + Math.random().toString(36).substring(2, 9);
         let mySymbol = "";
@@ -161,22 +170,23 @@
         );
 
         async function dbGet() {
-            const res = await fetch(roomUrl);
-            return await res.json();
+            const res = await fetch(`${SB_URL}?id=eq.${currentRoomId}&select=data`, { headers: HEADERS });
+            const rows = await res.json();
+            return rows.length > 0 ? rows.at(0).data : null;
         }
 
-        async function dbSet(data) {
-            await fetch(roomUrl, {
-                method: "PUT",
-                body: JSON.stringify(data)
+        async function dbSet(newData) {
+            await fetch(SB_URL, {
+                method: "POST",
+                headers: { ...HEADERS, "Prefer": "resolution=merge-duplicates" },
+                body: JSON.stringify({ id: currentRoomId, data: newData })
             });
         }
 
-        async function dbUpdate(data) {
-            await fetch(roomUrl, {
-                method: "PATCH",
-                body: JSON.stringify(data)
-            });
+        async function dbUpdate(patchData) {
+            const oldData = await dbGet();
+            if (!oldData) return;
+            await dbSet({ ...oldData, ...patchData });
         }
 
         async function joinGame() {
@@ -186,13 +196,11 @@
             const btn = document.getElementById("join-btn");
             btn.disabled = true;
             btn.innerText = "Подключение...";
-
-            roomUrl = `${DB_URL}/rooms/${roomCode}.json`;
+            currentRoomId = encodeURIComponent(roomCode);
 
             try {
                 const data = await dbGet();
                 const now = Date.now();
-                // Если комната старше 10 минут, считаем её свободной
                 const isOld = data && data.updated && (now - data.updated > 600000);
 
                 if (!data || !data.p1 || isOld) {
@@ -220,17 +228,15 @@
                 document.getElementById("game-screen").style.display = "flex";
                 createBoard();
 
-                // Проверяем состояние комнаты каждые 700 мс
                 pollTimer = setInterval(syncRoom, 700);
                 syncRoom();
             } catch (err) {
-                alert("Ошибка подключения к базе. Проверьте интернет или Rules в Firebase.");
+                alert("Ошибка подключения к Supabase. Проверь интернет.");
                 btn.disabled = false;
                 btn.innerText = "Войти в игру";
             }
         }
-
-        async function syncRoom() {
+                   async function syncRoom() {
             const state = await dbGet();
             if (!state) return;
 
@@ -386,9 +392,10 @@
             }
             syncRoom();
         }
+
         async function leaveGame() {
             clearInterval(pollTimer);
-            if (roomUrl) {
+            if (currentRoomId) {
                 const field = (mySymbol === "X") ? "p1" : "p2";
                 await dbUpdate({ [field]: "" });
             }
